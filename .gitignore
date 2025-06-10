@@ -1,0 +1,10 @@
+# JetBrains IDEs
+.idea/
+
+# Python virtual environment
+venv/
+*.pyc
+__pycache__/
+
+# Other common files to ignore
+.DS_Store
