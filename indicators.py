@@ -1,8 +1,9 @@
-# indicators.py
+# indicators.py (Updated with Factor-Based Weighted Scoring)
 
 import pandas as pd
 import ta
 import logging
+import math
 
 
 class IndicatorCalculator:
@@ -12,15 +13,13 @@ class IndicatorCalculator:
     def _get_trading_signals(self, latest, close_price):
         """Generates simple text-based trading signals."""
         signals = {}
-
         # RSI Signal
         if latest['RSI'] < 30:
-            signals['RSI_Signal'] = 'Bullish'
+            signals['RSI_Signal'] = 'Oversold'
         elif latest['RSI'] > 70:
-            signals['RSI_Signal'] = 'Bearish'
+            signals['RSI_Signal'] = 'Overbought'
         else:
             signals['RSI_Signal'] = 'Neutral'
-
         # MACD Signal
         if latest['MACD_Hist'] > 0 and latest['MACD_Hist_Prev'] < 0:
             signals['MACD_Signal'] = 'Bullish Crossover'
@@ -28,15 +27,13 @@ class IndicatorCalculator:
             signals['MACD_Signal'] = 'Bullish'
         elif latest['MACD_Hist'] < 0 and latest['MACD_Hist_Prev'] > 0:
             signals['MACD_Signal'] = 'Bearish Crossover'
-        else:  # MACD_Hist < 0
+        else:
             signals['MACD_Signal'] = 'Bearish'
-
         # Moving Average Signal
         if pd.notna(latest['SMA_50']) and close_price > latest['SMA_50']:
-            signals['SMA_50_Signal'] = 'Uptrend'
+            signals['SMA_50_Signal'] = 'Above SMA50'
         else:
-            signals['SMA_50_Signal'] = 'Downtrend'
-
+            signals['SMA_50_Signal'] = 'Below SMA50'
         # Golden/Death Cross Signal
         if pd.notna(latest['SMA_50']) and pd.notna(latest['SMA_200']):
             is_cross_state = latest['SMA_50'] > latest['SMA_200']
@@ -49,39 +46,48 @@ class IndicatorCalculator:
                 signals['Cross_Signal'] = 'No Cross'
         else:
             signals['Cross_Signal'] = 'N/A'
-
         return signals
 
-    def _get_technical_score(self, signals):
-        """
-        Generates a balanced score by adding points for bullish signals
-        and subtracting points for bearish signals.
-        """
-        score = 0
+    # --- NEW FACTOR-BASED SCORING ---
 
-        # --- Bullish Signals (Add Points) ---
-        if signals.get('RSI_Signal') == 'Bullish': score += 2
+    def _get_trend_score(self, signals, latest, close_price):
+        """Scores the quality and strength of the trend. Max score: 6"""
+        score = 0
+        if pd.notna(latest['SMA_200']) and close_price > latest['SMA_200']:
+            score += 3  # Being above the 200-day average is the most important trend signal
+        if signals.get('SMA_50_Signal') == 'Above SMA50':
+            score += 1
+        if signals.get('Cross_Signal') == 'Golden Cross':
+            score += 2  # This is a powerful, but event-based signal
+        # Penalize downtrends
+        if pd.notna(latest['SMA_200']) and close_price < latest['SMA_200']:
+            score -= 3
+        if signals.get('Cross_Signal') == 'Death Cross':
+            score -= 2
+        return score
+
+    def _get_momentum_score(self, signals, latest):
+        """Scores the current momentum. Max score: 4"""
+        score = 0
         if signals.get('MACD_Signal') == 'Bullish Crossover':
-            score += 2
+            score += 2  # A fresh crossover is a strong momentum signal
         elif signals.get('MACD_Signal') == 'Bullish':
             score += 1
-        if signals.get('SMA_50_Signal') == 'Uptrend': score += 1
-        if signals.get('Cross_Signal') == 'Golden Cross': score += 3
-
-        # --- Bearish Signals (Subtract Points) ---
-        if signals.get('RSI_Signal') == 'Bearish': score -= 2
+        # Reward healthy RSI, penalize overbought
+        if latest['RSI'] > 55 and latest['RSI'] < 70:
+            score += 1  # Healthy bullish momentum
+        if signals.get('RSI_Signal') == 'Overbought':
+            score -= 1
+        if signals.get('RSI_Signal') == 'Oversold':
+            score += 1  # Oversold can be a bullish reversal signal in this context
+        # Penalize bearish momentum
         if signals.get('MACD_Signal') == 'Bearish Crossover':
             score -= 2
-        elif signals.get('MACD_Signal') == 'Bearish':
-            score -= 1
-        if signals.get('SMA_50_Signal') == 'Downtrend': score -= 1
-        if signals.get('Cross_Signal') == 'Death Cross': score -= 3
-
         return score
 
     def calculate_indicators(self, df, timeframe_name):
         """
-        Calculates all indicators and returns them in the user-specified order.
+        Calculates all indicators and the new factor-based weighted score.
         """
         # --- 1. Calculate All Technical Indicators ---
         df['SMA_50'] = ta.trend.sma_indicator(df['Close'], window=50)
@@ -100,11 +106,28 @@ class IndicatorCalculator:
         close_price = latest['Close']
         if pd.isna(close_price): return {}
 
-        # --- 3. Generate Signals and Score ---
+        # --- 3. Generate Signals and Factor Scores ---
         signals = self._get_trading_signals(latest, close_price)
-        technical_score = self._get_technical_score(signals)
+        trend_score = self._get_trend_score(signals, latest, close_price)
+        momentum_score = self._get_momentum_score(signals, latest)
 
-        # --- 4. Assemble results in the desired order ---
+        # --- 4. Calculate Final Weighted Score (out of 10) ---
+        # Normalize factor scores to be on a 0-10 scale before applying weights
+        # Max possible trend_score is 6, max momentum_score is 4
+        # We handle cases where SMA200 is not available for short timeframes
+        max_trend_score = 6 if pd.notna(latest['SMA_200']) else 1
+        max_momentum_score = 4
+
+        # Avoid division by zero if max_trend_score is somehow 0
+        if max_trend_score == 0: max_trend_score = 1
+
+        norm_trend_score = (trend_score / max_trend_score) * 10
+        norm_momentum_score = (momentum_score / max_momentum_score) * 10
+
+        # Apply weights
+        final_score = (norm_trend_score * 0.60) + (norm_momentum_score * 0.40)
+
+        # --- 5. Assemble results in the desired order ---
         results = {
             'Ticker': latest['Ticker'],
             'Close_Price': "%.2f" % close_price,
@@ -118,7 +141,9 @@ class IndicatorCalculator:
             'MACD_Signal': signals.get('MACD_Signal'),
             'SMA_50_Signal': signals.get('SMA_50_Signal'),
             'Cross_Signal': signals.get('Cross_Signal'),
-            'Score': technical_score,  # Renamed from "Bullish_Score"
+            'Trend_Score': trend_score,
+            'Momentum_Score': momentum_score,
+            'Final_Score': "%.2f" % final_score,
         }
 
         return results

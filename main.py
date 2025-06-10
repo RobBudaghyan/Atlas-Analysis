@@ -1,4 +1,4 @@
-# main.py (Final Robust Version)
+# main.py
 
 import yfinance as yf
 import logging
@@ -46,19 +46,12 @@ def main():
                     continue
 
                 for ticker in tqdm(chunk, desc=f"Analyzing chunk {i + 1}", unit="ticker"):
-                    # Check if the ticker exists in the downloaded columns
                     if ticker in df_batch.columns:
-                        df = df_batch[ticker]  # Access data directly
-
-                        # --- FIX 1: ADDED 'None' and DATAFRAME CHECK ---
-                        # yfinance can return None for a failed ticker in a batch
-                        if df is None or not isinstance(df, pd.DataFrame):
-                            continue
+                        df = df_batch[ticker]
+                        if df is None or not isinstance(df, pd.DataFrame): continue
 
                         df = df.copy().dropna(how='all')
-
-                        if len(df) < 2:
-                            continue
+                        if len(df) < 2: continue
 
                         df['Ticker'] = ticker
                         indicators = indicator_calculator.calculate_indicators(df, timeframe_name)
@@ -66,9 +59,8 @@ def main():
                         if indicators:
                             timeframe_results.append(indicators)
 
-                # --- FIX 2: INCREASED PAUSE DURATION ---
-                logger.info("Chunk complete. Pausing for 2 seconds...")
-                time.sleep(2)
+                logger.info("Chunk complete. Pausing for 3 seconds...")
+                time.sleep(3)
 
             except Exception as e:
                 logger.error(f"A critical error occurred processing chunk {i + 1}: {e}")
@@ -76,7 +68,38 @@ def main():
 
         all_results[timeframe_name] = timeframe_results
 
-    report_generator.generate_report(all_results)
+    # --- CALCULATE MASTER SCORE AND RANKINGS ---
+    logger.info("All timeframes analyzed. Calculating Master Score...")
+
+    final_data = {}
+    for timeframe_name, results_list in all_results.items():
+        for result in results_list:
+            ticker = result['Ticker']
+            if ticker not in final_data:
+                final_data[ticker] = {}
+            # The 'Final_Score' is a string, convert it to a float for calculations
+            final_data[ticker][f"{timeframe_name}_Score"] = float(result.get('Final_Score', 0.0))
+
+    master_rankings = []
+    for ticker, scores in final_data.items():
+        long_term_score = scores.get('Long_Term_Analysis_Score', 0.0)
+        medium_term_score = scores.get('Medium_Term_Analysis_Score', 0.0)
+        short_term_score = scores.get('Short_Term_Analysis_Score', 0.0)
+
+        master_score = (long_term_score * 0.5) + (medium_term_score * 0.3) + (short_term_score * 0.2)
+
+        master_rankings.append({
+            'Ticker': ticker,
+            'Master_Score': "%.2f" % master_score,
+            'Long_Term_Score': "%.2f" % long_term_score,
+            'Medium_Term_Score': "%.2f" % medium_term_score,
+            'Short_Term_Score': "%.2f" % short_term_score
+        })
+
+    master_rankings = sorted(master_rankings, key=lambda x: float(x['Master_Score']), reverse=True)
+
+    # Pass both the detailed results and the new master rankings
+    report_generator.generate_report(all_results, master_rankings)
     logger.info("Analysis complete. Program finished.")
 
 
