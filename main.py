@@ -14,55 +14,33 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(mes
 logger = logging.getLogger()
 
 DATA_CACHE_DIR = 'data_cache'
+TIME_SLEEP = 0
 
 
-def fetch_and_clean_data(ticker, timeframe_name, params):
+def process_and_analyze_ticker(df, ticker, timeframe_name, indicator_calculator):
     """
-    Downloads data and robustly cleans it into a standard format.
+    Cleans a single ticker's DataFrame and runs the indicator analysis.
+    This function is called after data is either loaded from cache or downloaded.
     """
-    cache_path = os.path.join(DATA_CACHE_DIR, f"{ticker}_{timeframe_name}.csv")
-
-    if os.path.exists(cache_path):
-        mod_time = os.path.getmtime(cache_path)
-        if (time.time() - mod_time) / 3600 < 24:
-            try:
-                return pd.read_csv(cache_path, index_col=0, parse_dates=True)
-            except Exception as e:
-                logger.warning(f"Cache file for {ticker} is corrupt. Refetching. Error: {e}")
+    if df is None or df.empty:
+        return None
 
     try:
-        raw_df = yf.download(
-            ticker, period=params['period'], interval=params['interval'],
-            auto_adjust=True, progress=False
-        )
-        if raw_df is None or raw_df.empty:
+        # Clean the data
+        for col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df.dropna(inplace=True)
+
+        if len(df) < 50:
+            logger.warning(f"Not enough valid data for {ticker} after cleaning, skipping.")
             return None
 
-        clean_df = pd.DataFrame(index=raw_df.index)
-
-        for col in raw_df.columns:
-            col_name_str = str(col).lower()
-            if 'open' in col_name_str:
-                clean_df['open'] = raw_df[col]
-            elif 'high' in col_name_str:
-                clean_df['high'] = raw_df[col]
-            elif 'low' in col_name_str:
-                clean_df['low'] = raw_df[col]
-            elif 'close' in col_name_str:
-                clean_df['close'] = raw_df[col]
-            elif 'volume' in col_name_str:
-                clean_df['volume'] = raw_df[col]
-
-        required_cols = ['open', 'high', 'low', 'close', 'volume']
-        if not all(col in clean_df.columns for col in required_cols):
-            logger.warning(f"Could not find all required columns for {ticker}. Found: {list(clean_df.columns)}")
-            return None
-
-        clean_df.to_csv(cache_path)
-        return clean_df
-
+        # Run analysis
+        df['ticker'] = ticker
+        indicators = indicator_calculator.calculate_indicators(df.copy(), timeframe_name)
+        return indicators
     except Exception as e:
-        logger.error(f"Failed to download or process data for {ticker}: {e}")
+        logger.error(f"Error processing data for {ticker}: {e}")
         return None
 
 
@@ -74,29 +52,80 @@ def main():
 
     logger.info(f"Starting analysis for {len(config.TICKERS)} tickers...")
 
+    # --- CHUNKING LOGIC ---
+    chunk_size = 100  # Process 100 tickers at a time
+    ticker_chunks = [config.TICKERS[i:i + chunk_size] for i in range(0, len(config.TICKERS), chunk_size)]
+
     for timeframe_name, params in config.TIMEFRAMES.items():
         logger.info(f"Processing timeframe: {timeframe_name}...")
         timeframe_results = []
 
-        for ticker in tqdm(config.TICKERS, desc=f"Analyzing {timeframe_name}", unit="ticker"):
-            df = fetch_and_clean_data(ticker, timeframe_name, params)
+        progress_bar = tqdm(total=len(config.TICKERS), desc=f"Analyzing {timeframe_name}")
 
-            if df is None:
-                continue
+        for i, chunk in enumerate(ticker_chunks):
+            logger.info(f"Processing chunk {i + 1}/{len(ticker_chunks)} ({len(chunk)} tickers)")
 
-            for col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            df.dropna(inplace=True)
+            tickers_to_download = []
 
-            if len(df) < 50:
-                logger.warning(f"Not enough valid data for {ticker} after cleaning, skipping.")
-                continue
+            # First, process any tickers in the chunk that are already in the cache
+            for ticker in chunk:
+                cache_path = os.path.join(DATA_CACHE_DIR, f"{ticker}_{timeframe_name}.csv")
+                if os.path.exists(cache_path):
+                    try:
+                        mod_time = os.path.getmtime(cache_path)
+                        if (time.time() - mod_time) / 3600 < 24:  # Check if cache is fresh
+                            df_cached = pd.read_csv(cache_path, index_col=0, parse_dates=True)
+                            indicators = process_and_analyze_ticker(df_cached, ticker, timeframe_name,
+                                                                    indicator_calculator)
+                            if indicators:
+                                timeframe_results.append(indicators)
+                            progress_bar.update(1)
+                        else:  # Cache is stale, needs re-downloading
+                            tickers_to_download.append(ticker)
+                    except Exception as e:
+                        logger.warning(f"Cache file for {ticker} corrupt. Refetching. Error: {e}")
+                        tickers_to_download.append(ticker)
+                else:  # No cache file exists
+                    tickers_to_download.append(ticker)
 
-            df['ticker'] = ticker
-            indicators = indicator_calculator.calculate_indicators(df.copy(), timeframe_name)
-            if indicators:
-                timeframe_results.append(indicators)
+            # Now, download the batch of tickers that weren't in the cache
+            if tickers_to_download:
+                try:
+                    data_batch = yf.download(
+                        tickers_to_download,
+                        period=params['period'],
+                        interval=params['interval'],
+                        auto_adjust=True,
+                        progress=False,
+                        group_by='ticker'
+                    )
 
+                    # Process and cache each ticker from the newly downloaded batch
+                    for ticker in tickers_to_download:
+                        df_ticker = None
+                        if not data_batch.empty and ticker in data_batch.columns.get_level_values(0):
+                            df_ticker = data_batch.loc[:, ticker].copy()
+                            df_ticker.columns = [str(col).lower() for col in df_ticker.columns]
+
+                            # Save the clean data to cache
+                            cache_path = os.path.join(DATA_CACHE_DIR, f"{ticker}_{timeframe_name}.csv")
+                            df_ticker.to_csv(cache_path)
+
+                        indicators = process_and_analyze_ticker(df_ticker, ticker, timeframe_name, indicator_calculator)
+                        if indicators:
+                            timeframe_results.append(indicators)
+
+                        progress_bar.update(1)
+
+                except Exception as e:
+                    logger.error(f"An error occurred downloading chunk {i + 1}: {e}")
+                    progress_bar.update(len(tickers_to_download))
+
+            # Pause for 10 seconds between each chunk
+            logger.info(f"Chunk {i + 1} complete. Pausing for 10 seconds...")
+            time.sleep(TIME_SLEEP)
+
+        progress_bar.close()
         all_results[timeframe_name] = timeframe_results
 
     logger.info("All timeframes analyzed. Calculating Master Score...")
@@ -115,7 +144,6 @@ def main():
         short_term_score = scores.get('Short_Term_Analysis_Score', 0.0)
         master_score = (long_term_score * 0.5) + (medium_term_score * 0.3) + (short_term_score * 0.2)
 
-        # --- FIX: Reorder the columns as requested ---
         master_rankings.append({
             'Ticker': ticker,
             'Short_Term_Score': "%.2f" % short_term_score,
