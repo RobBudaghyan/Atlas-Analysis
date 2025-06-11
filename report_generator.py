@@ -28,7 +28,6 @@ class ReportGenerator:
 
             if 'Score' in str(col_name):
                 for row_idx, cell_value in enumerate(df[col_name], 2):
-                    # Ensure we are checking a numeric value
                     try:
                         numeric_value = float(cell_value)
                         cell = worksheet.cell(row=row_idx, column=col_idx)
@@ -37,10 +36,10 @@ class ReportGenerator:
                         elif numeric_value < 0:
                             cell.fill = self.bearish_fill
                     except (ValueError, TypeError):
-                        continue  # Skip non-numeric scores
+                        continue
 
     def generate_report(self, all_results, master_rankings=None, filename=None):
-        """Generates a timestamped Excel report with conditional formatting."""
+        """Generates a timestamped Excel report."""
         if filename is None:
             timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
             filename = f'stock_analysis_report_{timestamp}.xlsx'
@@ -56,10 +55,18 @@ class ReportGenerator:
 
         with pd.ExcelWriter(filename, engine='openpyxl') as writer:
             if has_master_rankings:
-                summary_df = pd.DataFrame(master_rankings).set_index('Ticker')
+                summary_df = pd.DataFrame(master_rankings)
+
+                # --- FIX: Define and apply the desired column order ---
+                desired_order = ['Ticker', 'Short_Term_Score', 'Medium_Term_Score', 'Long_Term_Score', 'Master_Score']
+                # Filter to only include columns that actually exist in the dataframe
+                final_columns = [col for col in desired_order if col in summary_df.columns]
+                summary_df = summary_df[final_columns]
+
+                summary_df.set_index('Ticker', inplace=True)
                 summary_df.to_excel(writer, sheet_name='Summary_Rankings')
-                self._apply_conditional_formatting(writer.sheets['Summary_Rankings'], summary_df.reset_index())
-                logging.info("Created and formatted 'Summary_Rankings' sheet.")
+                # --- FIX: Conditional formatting is now skipped for this sheet ---
+                logging.info("Created 'Summary_Rankings' sheet.")
 
             if has_all_results:
                 for timeframe_name, results in all_results.items():
@@ -69,6 +76,7 @@ class ReportGenerator:
 
                     df = pd.DataFrame(results).set_index('Ticker')
                     df.to_excel(writer, sheet_name=timeframe_name)
+                    # Apply formatting to the detailed sheets
                     self._apply_conditional_formatting(writer.sheets[timeframe_name], df.reset_index())
                     logging.info(f"Wrote and formatted sheet for {timeframe_name}.")
 

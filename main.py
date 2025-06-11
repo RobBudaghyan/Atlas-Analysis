@@ -19,11 +19,9 @@ DATA_CACHE_DIR = 'data_cache'
 def fetch_and_clean_data(ticker, timeframe_name, params):
     """
     Downloads data and robustly cleans it into a standard format.
-    This function is designed to be immune to yfinance formatting inconsistencies.
     """
     cache_path = os.path.join(DATA_CACHE_DIR, f"{ticker}_{timeframe_name}.csv")
 
-    # Try to load from cache first
     if os.path.exists(cache_path):
         mod_time = os.path.getmtime(cache_path)
         if (time.time() - mod_time) / 3600 < 24:
@@ -32,7 +30,6 @@ def fetch_and_clean_data(ticker, timeframe_name, params):
             except Exception as e:
                 logger.warning(f"Cache file for {ticker} is corrupt. Refetching. Error: {e}")
 
-    # --- Download and Rebuild DataFrame from Scratch ---
     try:
         raw_df = yf.download(
             ticker, period=params['period'], interval=params['interval'],
@@ -41,10 +38,8 @@ def fetch_and_clean_data(ticker, timeframe_name, params):
         if raw_df is None or raw_df.empty:
             return None
 
-        # Create a new, clean DataFrame
         clean_df = pd.DataFrame(index=raw_df.index)
 
-        # Search for required columns case-insensitively and copy them
         for col in raw_df.columns:
             col_name_str = str(col).lower()
             if 'open' in col_name_str:
@@ -63,7 +58,6 @@ def fetch_and_clean_data(ticker, timeframe_name, params):
             logger.warning(f"Could not find all required columns for {ticker}. Found: {list(clean_df.columns)}")
             return None
 
-        # Save the clean data to cache
         clean_df.to_csv(cache_path)
         return clean_df
 
@@ -90,7 +84,6 @@ def main():
             if df is None:
                 continue
 
-            # Coerce to numeric and drop NA
             for col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             df.dropna(inplace=True)
@@ -117,15 +110,18 @@ def main():
 
     master_rankings = []
     for ticker, scores in final_data.items():
-        master_score = (scores.get('Long_Term_Analysis_Score', 0.0) * 0.5) + \
-                       (scores.get('Medium_Term_Analysis_Score', 0.0) * 0.3) + \
-                       (scores.get('Short_Term_Analysis_Score', 0.0) * 0.2)
+        long_term_score = scores.get('Long_Term_Analysis_Score', 0.0)
+        medium_term_score = scores.get('Medium_Term_Analysis_Score', 0.0)
+        short_term_score = scores.get('Short_Term_Analysis_Score', 0.0)
+        master_score = (long_term_score * 0.5) + (medium_term_score * 0.3) + (short_term_score * 0.2)
+
+        # --- FIX: Reorder the columns as requested ---
         master_rankings.append({
             'Ticker': ticker,
-            'Master_Score': "%.2f" % master_score,
-            'Long_Term_Score': "%.2f" % scores.get('Long_Term_Analysis_Score', 0.0),
-            'Medium_Term_Score': "%.2f" % scores.get('Medium_Term_Analysis_Score', 0.0),
-            'Short_Term_Score': "%.2f" % scores.get('Short_Term_Analysis_Score', 0.0)
+            'Short_Term_Score': "%.2f" % short_term_score,
+            'Medium_Term_Score': "%.2f" % medium_term_score,
+            'Long_Term_Score': "%.2f" % long_term_score,
+            'Master_Score': "%.2f" % master_score
         })
 
     master_rankings = sorted(master_rankings, key=lambda x: float(x['Master_Score']), reverse=True)
